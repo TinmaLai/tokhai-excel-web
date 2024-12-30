@@ -2,19 +2,19 @@ from django.shortcuts import render
 
 # Create your views here.
 # export/views.py
-from rest_framework.viewsets import viewsets
+from rest_framework.viewsets import ModelViewSet
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import action
 from ..models import ExportDeclaration
 from ..serializers import ExportDeclarationSerializer
-from django.db import connection
-import json
-from django.shortcuts import get_object_or_404
 import re
-from ...enum.mode_enum import ModeEnum
+from enums.mode_enum import ModeEnum
+from django.core.paginator import Paginator, EmptyPage
 
-class ExportDeclarationList(viewsets.ModelViewSet):
+class ExportDeclarationList(ModelViewSet):
+    queryset = ExportDeclaration.objects.all()
+    serializer_class = ExportDeclarationSerializer
     def parseWhere(self, where_clause):
         
         # Loại bỏ các khoảng trắng thừa ở đầu và cuối
@@ -37,81 +37,102 @@ class ExportDeclarationList(viewsets.ModelViewSet):
 
         return where_clause  # Nếu tất cả các biểu thức hợp lệ, trả về mệnh đề WHERE ban đầu
     @action(detail=False, methods=['post'])
-    def get_list(self, request): 
+    def get_list(self, request):
+        """
+        Lấy danh sách tờ khai theo điều kiện
+        + filters: Danh sách các trường lọc
+        + take: trang số mấy
+        + limit: số lượng bản ghi cần lấy
+        """
+        # parse param từ client
         filters = request.data.get('filters', None)  # Default là None nếu không có tham số
-        take = int(request.data.get('take', 0))  # Default là 10 nếu không có tham số
-        limit = int(request.data.get('limit', 10))  # Default là 10 nếu không có tham số
+        take = int(request.data.get('take', 0))  # Trang hiện tại
+        limit = int(request.data.get('limit', 10))  # Số lượng bản ghi
+
+        # Danh sách các cột, biểu thức có thể so sánh
         allowed_columns = [field.name for field in ExportDeclaration._meta.fields]
         allowed_operators = ["=", "!=", "<", ">", "<=", ">="]
-        params = []
-        whereClause = ""
-        sql = 'SELECT * FROM export_declaration'
 
-        # Thêm các điều kiện vào câu SQL nếu filters được truyền
+        # Xây dựng các điều kiện filter động
+        filter_kwargs = {}
+
         if filters:
-            filter_conditions = filters
-            for condition in filter_conditions:
-                if 'field' in condition:
-                    if(condition['field'] in allowed_columns):
-                        whereClause += f" {condition['field']}"
-                if 'operator' in condition:
-                    if(condition['operator'] in allowed_operators):
-                        whereClause += f" {condition['operator']}"
-                if 'value' in condition:
-                    whereClause += " %s"
-                    params.append(condition['value'])
+            for condition in filters:
+                field = condition.get('field')
+                operator = condition.get('operator')
+                value = condition.get('value')
 
-        sql += f' WHERE {self.parseWhere(whereClause)}'    
-        # Thêm LIMIT và OFFSET cho phân trang
-        if take > 0:
-            sql += " LIMIT %s OFFSET %s"
-            params.append(limit)
-            params.append(take)
+                # Kiểm tra trường hợp filter hợp lệ
+                if field not in allowed_columns:
+                    return Response({"error": f"wrong field {field}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        cursor = connection.cursor()
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
+                if operator not in allowed_operators:
+                    return Response({"error": f"wrong operator {operator}"}, status=status.HTTP_400_BAD_REQUEST)
 
-        results = []
-        for row in rows:
-            if len(row) == len(allowed_columns):
-                result = dict(zip(allowed_columns, row))
-                results.append(result)
+                # Xử lý giá trị lọc theo operator
+                if operator == "=":
+                    filter_kwargs[f'{field}'] = value
+                elif operator == "!=":
+                    filter_kwargs[f'{field}__neq'] = value  # Django ORM không hỗ trợ trực tiếp "!=" nhưng có thể dùng '__neq'
+                elif operator == "<":
+                    filter_kwargs[f'{field}__lt'] = value
+                elif operator == ">":
+                    filter_kwargs[f'{field}__gt'] = value
+                elif operator == "<=":
+                    filter_kwargs[f'{field}__lte'] = value
+                elif operator == ">=":
+                    filter_kwargs[f'{field}__gte'] = value
 
-        return Response(results, status=status.HTTP_200_OK) 
-    @action(detail=False, methods=['get'])
-    def get(self, request, id=None):
-        export_declaration = get_object_or_404(ExportDeclaration, declaration_id=id)
-        serializer = ExportDeclarationSerializer(export_declaration)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        # Sử dụng filter() để lọc theo các điều kiện đã xây dựng
+        queryset = ExportDeclaration.objects.filter(**filter_kwargs)
+
+        # Thực hiện phân trang nếu cần
+        # Tạo Paginator để phân trang
+        paginator = Paginator(queryset, limit)
+
+        try:
+            # Lấy trang cần thiết
+            page_obj = paginator.page(take)
+        except EmptyPage:
+            return Response({"error": "Page not found"}, status=status.HTTP_404_NOT_FOUND)
+
+         # Chuyển kết quả thành dạng list
+        results = list(page_obj.object_list.values())
+
+        return Response(results, status=status.HTTP_200_OK)
     @action(detail=False, methods=['post'])
     def save_declaration(self, request):
+        """
+        Thực hiện lưu/sửa bản ghi tờ khai
+        mode: 1 - insert, 2 - update
+        """
         # Lấy mode từ request
         mode = request.data.get('mode', 1)  # Mặc định là mode 1 (thêm mới)
-        declaration_number = request.data.get('declaration_number')
+        record = request.data.get('record')
 
         # Nếu mode là 1 (thêm mới)
-        if mode == ModeEnum.ADD:
-            serializer = ExportDeclarationSerializer(data=request.data)
+        if mode == ModeEnum.ADD.value:
+            serializer = ExportDeclarationSerializer(data=record)
             if serializer.is_valid():
                 serializer.save()
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         # Nếu mode là 2 (sửa bản ghi)
-        elif mode == ModeEnum.UPDATE:
-            # Tìm bản ghi theo `declaration_number`
+        elif mode == ModeEnum.UPDATE.value:
+            # Tìm bản ghi theo `declaration_id`
             try:
-                export_declaration = ExportDeclaration.objects.get(declaration_number=declaration_number)
+                export_declaration = ExportDeclaration.objects.get(declaration_id=record.get('declaration_id'))
             except ExportDeclaration.DoesNotExist:
                 return Response({"detail": "Bản ghi không tồn tại"}, status=status.HTTP_404_NOT_FOUND)
 
             # Cập nhật bản ghi
-            serializer = ExportDeclarationSerializer(export_declaration, data=request.data, partial=True)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_200_OK)
+            serializerUpdate = ExportDeclarationSerializer(export_declaration, data=record, partial=True)
+            if serializerUpdate.is_valid():
+                serializerUpdate.save()
+                return Response(serializerUpdate.data, status=status.HTTP_200_OK)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         # Trả về lỗi nếu mode không hợp lệ
         return Response({"detail": "Mode không hợp lệ"}, status=status.HTTP_400_BAD_REQUEST)
+    
