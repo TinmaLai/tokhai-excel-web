@@ -13,29 +13,11 @@ from enums.mode_enum import ModeEnum
 from django.core.paginator import Paginator, EmptyPage
 
 class ExportDeclarationList(ModelViewSet):
+    """
+    Dùng ModelViewSet để có sẵn các method cơ bản CRUD, chỉ viết lại những method cần (@action ở dưới)
+    """
     queryset = ExportDeclaration.objects.all()
     serializer_class = ExportDeclarationSerializer
-    def parseWhere(self, where_clause):
-        
-        # Loại bỏ các khoảng trắng thừa ở đầu và cuối
-        where_clause = where_clause.strip()
-        
-        # Kiểm tra nếu mệnh đề WHERE không rỗng và không chứa các toán tử AND/OR không hợp lệ
-        if not where_clause:
-            return ''
-        
-        # Split mệnh đề WHERE bằng các từ khóa AND và OR, phải có ít nhất một biểu thức hợp lệ
-        expressions = re.split(r'(?i)\s*(AND|OR)\s*', where_clause)
-
-        # Kiểm tra từng biểu thức nếu nó có đúng định dạng field = %s
-        pattern = r'^[a-zA-Z0-9_]+\s*=\s*%s$'
-        
-        for expr in expressions:
-            expr = expr.strip()  # loại bỏ khoảng trắng ở đầu và cuối
-            if not re.match(pattern, expr):
-                return ''  # Nếu có biểu thức không hợp lệ, trả về chuỗi rỗng
-
-        return where_clause  # Nếu tất cả các biểu thức hợp lệ, trả về mệnh đề WHERE ban đầu
     @action(detail=False, methods=['post'])
     def get_list(self, request):
         """
